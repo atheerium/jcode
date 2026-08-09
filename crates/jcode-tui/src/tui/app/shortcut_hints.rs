@@ -44,6 +44,7 @@ const STATE_FILE: &str = "keybinding_proficiency.json";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LearnableAction {
     Resume,
+    ModelPicker,
     ModelSwitch,
     EffortCycle,
     Alignment,
@@ -51,8 +52,9 @@ pub(crate) enum LearnableAction {
 
 impl LearnableAction {
     /// Every action the system knows about, in a stable order.
-    pub(crate) const ALL: [LearnableAction; 4] = [
+    pub(crate) const ALL: [LearnableAction; 5] = [
         LearnableAction::Resume,
+        LearnableAction::ModelPicker,
         LearnableAction::ModelSwitch,
         LearnableAction::EffortCycle,
         LearnableAction::Alignment,
@@ -62,6 +64,7 @@ impl LearnableAction {
     pub(crate) fn id(self) -> &'static str {
         match self {
             LearnableAction::Resume => "resume",
+            LearnableAction::ModelPicker => "model_picker",
             LearnableAction::ModelSwitch => "model_switch",
             LearnableAction::EffortCycle => "effort_cycle",
             LearnableAction::Alignment => "alignment",
@@ -77,6 +80,7 @@ impl LearnableAction {
     fn phrase(self) -> &'static str {
         match self {
             LearnableAction::Resume => "open the session picker",
+            LearnableAction::ModelPicker => "open the model picker",
             LearnableAction::ModelSwitch => "switch models",
             LearnableAction::EffortCycle => "change reasoning effort",
             LearnableAction::Alignment => "toggle centered layout",
@@ -89,6 +93,7 @@ impl LearnableAction {
         use crate::tui::keybind;
         match self {
             LearnableAction::Resume => keybind::load_open_resume_key().label,
+            LearnableAction::ModelPicker => keybind::load_model_picker_toggle_key().label,
             LearnableAction::ModelSwitch => keybind::model_switch_next_label(),
             LearnableAction::EffortCycle => keybind::effort_increase_label(),
             LearnableAction::Alignment => keybind::centered_toggle_label(),

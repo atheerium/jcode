@@ -98,6 +98,7 @@ pub(super) struct RegistryInputs<'a> {
     pub dictation: &'a OptionalBinding,
     pub new_terminal: &'a OptionalBinding,
     pub open_resume: &'a OptionalBinding,
+    pub model_picker_toggle: &'a OptionalBinding,
     pub fallback_switch: &'a OptionalBinding,
     /// Workspace navigation only dispatches in remote/client mode.
     pub remote: bool,
@@ -169,6 +170,11 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
         inputs.open_resume.binding.clone(),
         "open_resume",
         "open the session picker",
+    );
+    push(
+        inputs.model_picker_toggle.binding.clone(),
+        "model_picker_toggle",
+        "open the model picker",
     );
     // Context-armed accept key (fallback offer / update merge). Quiet: it only
     // acts when an offer is on screen, which already explains itself.
@@ -718,6 +724,7 @@ impl App {
             dictation: &self.dictation_key,
             new_terminal: &self.new_terminal_key,
             open_resume: &self.open_resume_key,
+            model_picker_toggle: &self.model_picker_toggle_key,
             fallback_switch: &self.fallback_switch_key,
             remote,
         })
@@ -887,6 +894,10 @@ mod tests {
             binding: Some(alt('r')),
             label: Some("Alt+R".to_string()),
         };
+        let model_picker_toggle = OptionalBinding {
+            binding: Some(alt('p')),
+            label: Some("Alt+P".to_string()),
+        };
         let fallback_switch = OptionalBinding {
             binding: Some(ctrl('y')),
             label: Some("Ctrl+Y".to_string()),
@@ -901,6 +912,7 @@ mod tests {
             dictation: &dictation,
             new_terminal: &new_terminal,
             open_resume: &open_resume,
+            model_picker_toggle: &model_picker_toggle,
             fallback_switch: &fallback_switch,
             remote,
         })
@@ -1052,6 +1064,7 @@ mod tests {
             ("workspace_right", Some(&["workspace_right"])),
             ("new_terminal", Some(&["new_terminal"])),
             ("open_resume", Some(&["open_resume"])),
+            ("model_picker_toggle", Some(&["model_picker_toggle"])),
         ];
 
         let registry = test_inputs_registry(true);

@@ -584,6 +584,18 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_cmd_p_sequence_matches_model_picker_toggle_binding() {
+        // Ghostty forwards Cmd+P as ESC[112;9u (112='p', super-only).
+        let code = KeyCode::Char(char::from_u32(112).unwrap());
+        let mods = kitty_mods(9);
+        let binding = parse_keybinding("cmd+p").expect("cmd+p parses");
+        assert!(
+            binding.matches_for_platform(code, mods, true),
+            "Cmd+P kitty sequence must trigger the model_picker_toggle binding"
+        );
+    }
+
+    #[test]
     fn ghostty_cmd_shift_semicolon_sequence_matches_new_terminal_binding() {
         // Ghostty forwards Cmd+Shift+; as ESC[59;10u (59=';', shift+super).
         let code = KeyCode::Char(char::from_u32(59).unwrap());

@@ -1928,6 +1928,11 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
+    if app.model_picker_toggle_key_matches(code, modifiers) {
+        app.open_model_picker();
+        return Ok(());
+    }
+
     if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
         return Ok(());
     }

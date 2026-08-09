@@ -1435,6 +1435,8 @@ pub struct App {
     new_terminal_key: OptionalBinding,
     // Optional configured keybinding for opening the /resume session picker
     open_resume_key: OptionalBinding,
+    // Optional configured keybinding for opening the /model model picker
+    model_picker_toggle_key: OptionalBinding,
     // Optional configured keybinding for accepting the post-error fallback offer
     fallback_switch_key: OptionalBinding,
     // Config reload generation the keybinding snapshot above was parsed at.

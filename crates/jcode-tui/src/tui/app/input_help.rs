@@ -26,7 +26,7 @@ impl App {
                 "/cls\nClear the rendered view only. The model keeps its full context; nothing is sent or forgotten. (Ctrl+L clears the screen but keeps history in scrollback.)"
             }
             "model" => {
-                "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin)."
+                "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin).{model_picker_shortcut}"
             }
             "provider-test-coverage"
             | "provider test coverage"
@@ -225,6 +225,12 @@ impl App {
             None => String::new(),
         };
         let help = help.replace("{resume_shortcut}", &resume_shortcut);
+        let model_picker_shortcut = match crate::tui::keybind::load_model_picker_toggle_key().label
+        {
+            Some(label) => format!("\n\nShortcut: {label}"),
+            None => String::new(),
+        };
+        let help = help.replace("{model_picker_shortcut}", &model_picker_shortcut);
         // Mac keyboards have no "Alt" key; show the ⌥ keycap instead.
         let help = help.replace(
             "Alt+",

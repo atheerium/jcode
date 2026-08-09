@@ -333,6 +333,14 @@ pub const KEYBINDING_DEFAULTS: &[KeybindingDefault] = &[
         macos: PlatformDefault::dev("cmd+b"),
         other: PlatformDefault::dev("alt+r"),
     },
+    KeybindingDefault {
+        id: "model_picker_toggle",
+        description: "Open the /model model picker",
+        // Cmd+P is the classic command-palette shortcut and is free in jcode
+        // on macOS; Alt+P is free on Windows/Linux.
+        macos: PlatformDefault::dev("cmd+p"),
+        other: PlatformDefault::dev("alt+p"),
+    },
 ];
 
 /// Look up a keybinding action by id.

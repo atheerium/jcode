@@ -97,6 +97,10 @@ swarm_panel_focus = "alt+n"
 # Default: Cmd+B on macOS, Alt+R on Windows/Linux. Set "" to disable.
 # open_resume = "cmd+b"
 
+# Open the /model model picker (fuzzy search over available models).
+# Default: Cmd+P on macOS, Alt+P on Windows/Linux. Set "" to disable.
+# model_picker_toggle = "cmd+p"
+
 # /resume picker Enter behavior. Options: "current-terminal" or "new-terminal".
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
 session_picker_enter = "current-terminal"

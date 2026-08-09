@@ -984,6 +984,9 @@ pub struct KeybindingsConfig {
     /// Open the `/resume` session picker (default: "cmd+b" on macOS, "alt+r"
     /// elsewhere). Set "" to disable.
     pub open_resume: String,
+    /// Open the `/model` model picker (default: "cmd+p" on macOS, "alt+p"
+    /// elsewhere). Set "" to disable.
+    pub model_picker_toggle: String,
     /// Session picker Enter action: "current-terminal" (default) or "new-terminal".
     /// Ctrl+Enter performs the alternate action.
     pub session_picker_enter: SessionPickerResumeAction,
@@ -1033,6 +1036,14 @@ impl Default for KeybindingsConfig {
                     "cmd+b"
                 } else {
                     "alt+r"
+                },
+            ),
+            model_picker_toggle: get(
+                "model_picker_toggle",
+                if cfg!(target_os = "macos") {
+                    "cmd+p"
+                } else {
+                    "alt+p"
                 },
             ),
             session_picker_enter: SessionPickerResumeAction::CurrentTerminal,

@@ -611,6 +611,21 @@ pub fn load_open_resume_key() -> OptionalBinding {
     }
 }
 
+pub fn load_model_picker_toggle_key() -> OptionalBinding {
+    let cfg = config();
+    let raw = cfg.keybindings.model_picker_toggle.trim();
+    if raw.is_empty() || is_disabled(raw) {
+        return OptionalBinding::default();
+    }
+    match parse_keybinding(raw) {
+        Some(binding) => OptionalBinding {
+            label: Some(format_binding(&binding)),
+            binding: Some(binding),
+        },
+        None => OptionalBinding::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
