@@ -1,6 +1,8 @@
 //! MCP (Model Context Protocol) client implementation
 //!
 //! Connects to MCP servers that provide tools via JSON-RPC over stdio.
+//! HTTP/SSE (remote) server entries are bridged to stdio through
+//! `mcp-remote` at config load time (see [`McpServerConfig::to_bridge_config`]).
 //! Supports shared server pools so multiple sessions reuse the same
 //! MCP server processes instead of spawning duplicates.
 

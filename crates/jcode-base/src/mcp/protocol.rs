@@ -188,8 +188,8 @@ pub struct ResourceContent {
 /// MCP server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
-    /// Command for stdio servers. Empty for HTTP/SSE servers, which jcode does
-    /// not yet support (such entries are skipped at load time).
+    /// Command for stdio servers. Empty for HTTP/SSE servers, which are
+    /// bridged to stdio via `mcp-remote` at load time (see `to_bridge_config`).
     #[serde(default)]
     pub command: String,
     #[serde(default)]
@@ -201,15 +201,18 @@ pub struct McpServerConfig {
     /// Stateful servers (Playwright browser) should not be shared.
     #[serde(default = "default_shared")]
     pub shared: bool,
-    /// Transport type from Claude Code configs ("stdio", "http", "sse"). Used
-    /// only to recognize and skip non-stdio servers; defaults to stdio.
+    /// Transport type from Claude Code configs ("stdio", "http", "sse").
+    /// HTTP/SSE entries are bridged to stdio via `mcp-remote`; the value also
+    /// picks the bridge transport strategy (http-first vs sse-first). Defaults
+    /// to stdio when absent.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
-    /// URL for HTTP/SSE servers (Claude Code compat). Unused by jcode today.
+    /// URL for HTTP/SSE servers (Claude Code compat). The stdio bridge
+    /// (`mcp-remote`) connects to this endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Headers for HTTP/SSE servers (Claude Code compat). Unused by jcode today,
-    /// but retained so environment expansion is ready when those transports are.
+    /// Headers for HTTP/SSE servers (Claude Code compat). Forwarded to the
+    /// bridge as `--header` arguments (e.g. static bearer tokens).
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub headers: std::collections::HashMap<String, String>,
     /// Whether this server is enabled (default: true). Disabled servers stay
@@ -246,6 +249,63 @@ impl McpServerConfig {
             return !disabled;
         }
         self.enabled.unwrap_or(true)
+    }
+
+    /// Translate an HTTP/SSE server entry into a stdio bridge config that
+    /// spawns `mcp-remote` (https://github.com/geelen/mcp-remote), so the
+    /// existing stdio runtime can talk to remote MCP servers.
+    ///
+    /// This is the same pattern mcp-remote documents for stdio-only clients
+    /// (Claude Desktop, Cursor, Windsurf). Returns `None` when the entry has
+    /// no URL to bridge to (the caller drops it).
+    pub fn to_bridge_config(&self) -> Option<Self> {
+        let url = self
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())?;
+
+        let mut args = vec![
+            "-y".to_string(), // auto-accept the npx install
+            "mcp-remote".to_string(),
+            url.to_string(),
+        ];
+        match self
+            .transport
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("sse") => {
+                args.push("--transport".to_string());
+                args.push("sse-first".to_string());
+            }
+            Some("http") | Some("streamable-http") | Some("streamablehttp") => {
+                args.push("--transport".to_string());
+                args.push("http-first".to_string());
+            }
+            _ => {}
+        }
+        for (key, value) in &self.headers {
+            args.push("--header".to_string());
+            // One argv entry ("Key: Value"), so spaces are safe: we spawn via
+            // Command::arg, never through a shell.
+            args.push(format!("{key}: {value}"));
+        }
+
+        Some(Self {
+            command: "npx".to_string(),
+            args,
+            env: self.env.clone(),
+            shared: self.shared,
+            // The bridge speaks stdio; keep the original transport/url/headers
+            // on the entry so config display still shows what it bridges to.
+            transport: None,
+            url: self.url.clone(),
+            headers: self.headers.clone(),
+            enabled: self.enabled,
+            disabled: self.disabled,
+        })
     }
 }
 
@@ -664,30 +724,49 @@ impl McpConfig {
         // support receives already-expanded URLs and headers as well.
         merged.expand_environment_variables();
 
-        // jcode only supports stdio servers today. Drop HTTP/SSE entries (common
-        // in Claude Code configs) so they don't fail to spawn, but log them so
-        // the omission is visible.
-        merged.servers.retain(|name, cfg| {
-            let keep = cfg.is_stdio();
-            if !keep {
-                crate::logging::info(&format!(
-                    "MCP: Skipping non-stdio server '{}' ({}); HTTP/SSE transports are not yet supported",
-                    name,
-                    cfg.transport.as_deref().unwrap_or("http")
-                ));
-            }
-            keep
-        });
+        // jcode's runtime speaks stdio MCP. HTTP/SSE entries (common in Claude
+        // Code configs) are bridged to stdio via `mcp-remote` so they work
+        // instead of being dropped. Entries with no URL to bridge are dropped
+        // and logged, so the omission stays visible.
+        merged.servers = std::mem::take(&mut merged.servers)
+            .into_iter()
+            .filter_map(|(name, cfg)| {
+                if cfg.is_stdio() {
+                    return Some((name, cfg));
+                }
+                match cfg.to_bridge_config() {
+                    Some(bridge) => {
+                        crate::logging::info(&format!(
+                            "MCP: Bridging HTTP/SSE server '{}' ({}) via mcp-remote -> {}",
+                            name,
+                            cfg.transport.as_deref().unwrap_or("http"),
+                            cfg.url.as_deref().unwrap_or("")
+                        ));
+                        Some((name, bridge))
+                    }
+                    None => {
+                        crate::logging::info(&format!(
+                            "MCP: Dropping non-stdio server '{}' ({}): no URL to bridge",
+                            name,
+                            cfg.transport.as_deref().unwrap_or("http")
+                        ));
+                        None
+                    }
+                }
+            })
+            .collect();
 
         merged
     }
 
     /// Merge `incoming` over `existing`, except that an entry jcode cannot run
-    /// (HTTP/SSE) never displaces a working stdio entry for the same name.
+    /// (HTTP/SSE without a bridgeable URL) never displaces a working stdio
+    /// entry for the same name.
     ///
-    /// Without this, a `type: http` entry in `~/.claude.json` would overwrite a
-    /// working stdio server from `~/.jcode/mcp.json` and then be dropped by the
-    /// non-stdio filter, silently losing the server (issue #653).
+    /// HTTP/SSE entries are now bridged to stdio, but a real stdio server for
+    /// the same name still wins: it runs directly with no bridge dependency.
+    /// Without this guard, a `type: http` entry in `~/.claude.json` would
+    /// overwrite a working stdio server from `~/.jcode/mcp.json` (issue #653).
     fn merge_servers_preferring_runnable(
         existing: &mut std::collections::HashMap<String, McpServerConfig>,
         incoming: std::collections::HashMap<String, McpServerConfig>,

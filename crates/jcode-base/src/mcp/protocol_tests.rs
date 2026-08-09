@@ -147,6 +147,130 @@ fn test_mcp_http_server_is_not_stdio() {
 }
 
 #[test]
+fn http_entry_bridges_to_mcp_remote() {
+    let config: McpConfig = serde_json::from_str(
+        r#"{"mcpServers":{"remote":{"type":"http","url":"https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    let server = config.servers.get("remote").unwrap();
+    let bridge = server.to_bridge_config().expect("http entry bridges");
+    assert!(
+        bridge.is_stdio(),
+        "bridged entry must look stdio to the runtime"
+    );
+    assert_eq!(bridge.command, "npx");
+    assert_eq!(
+        bridge.args,
+        vec![
+            "-y",
+            "mcp-remote",
+            "https://example.com/mcp",
+            "--transport",
+            "http-first",
+        ]
+    );
+    assert_eq!(bridge.url.as_deref(), Some("https://example.com/mcp"));
+}
+
+#[test]
+fn sse_entry_bridges_with_sse_first_and_headers() {
+    let config: McpConfig = serde_json::from_str(
+        r#"{"mcpServers":{"remote":{
+            "type":"sse",
+            "url":"https://example.com/sse",
+            "headers":{"Authorization":"Bearer secret-token","X-Custom":"yes"}
+        }}}"#,
+    )
+    .unwrap();
+    let server = config.servers.get("remote").unwrap();
+    let bridge = server.to_bridge_config().expect("sse entry bridges");
+    assert!(bridge.is_stdio());
+    assert_eq!(
+        &bridge.args[..5],
+        &[
+            "-y",
+            "mcp-remote",
+            "https://example.com/sse",
+            "--transport",
+            "sse-first"
+        ]
+    );
+    // Headers become --header "Key: Value" argv entries (spaces safe via Command::arg).
+    assert!(
+        bridge
+            .args
+            .windows(2)
+            .any(|w| w == ["--header", "Authorization: Bearer secret-token"])
+    );
+    assert!(
+        bridge
+            .args
+            .windows(2)
+            .any(|w| w == ["--header", "X-Custom: yes"])
+    );
+}
+
+#[test]
+fn non_stdio_entry_without_url_is_not_bridgeable() {
+    let config: McpConfig =
+        serde_json::from_str(r#"{"mcpServers":{"broken":{"type":"http"}}}"#).unwrap();
+    let server = config.servers.get("broken").unwrap();
+    assert!(server.to_bridge_config().is_none());
+}
+
+#[test]
+fn load_for_dir_bridges_http_entries_instead_of_dropping() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::create_dir_all(home.path()).expect("create home dir");
+    std::fs::write(
+        home.path().join("mcp.json"),
+        r#"{"mcpServers":{
+            "remote-http":{"type":"http","url":"https://example.com/mcp"},
+            "remote-sse":{"type":"sse","url":"https://example.com/sse"},
+            "local-stdio":{"command":"local-server"}
+        }}"#,
+    )
+    .expect("write mcp.json");
+
+    let result = std::panic::catch_unwind(|| {
+        let loaded = McpConfig::load_for_dir(None);
+        let http = loaded.servers.get("remote-http").expect("http entry kept");
+        assert!(http.is_stdio());
+        assert_eq!(http.command, "npx");
+        assert!(
+            http.args
+                .windows(2)
+                .any(|w| w == ["--transport", "http-first"])
+        );
+
+        let sse = loaded.servers.get("remote-sse").expect("sse entry kept");
+        assert!(sse.is_stdio());
+        assert!(
+            sse.args
+                .windows(2)
+                .any(|w| w == ["--transport", "sse-first"])
+        );
+
+        let stdio = loaded
+            .servers
+            .get("local-stdio")
+            .expect("stdio entry untouched");
+        assert_eq!(stdio.command, "local-server");
+        assert!(stdio.args.is_empty());
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result.expect("MCP http bridge load assertions");
+}
+
+#[test]
 fn environment_expansion_matches_claude_syntax_across_config_fields() {
     let json = r#"{
         "mcpServers": {
