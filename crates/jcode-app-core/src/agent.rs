@@ -233,6 +233,15 @@ pub struct Agent {
     mcp_late_register_resolved: bool,
     /// Override system prompt (used by ambient mode to inject a custom prompt)
     system_prompt_override: Option<String>,
+    /// Session-pinned snapshot of the file-backed static prompt inputs
+    /// (system-prompt.md, AGENTS.md, prompt-overlay.md, preferred-tools.md).
+    /// Loaded once per session so mid-session edits cannot silently invalidate
+    /// the provider prompt cache.
+    static_prompt_files: std::sync::OnceLock<crate::prompt::StaticPromptFiles>,
+    /// Guards the one-time warning when a pinned static prompt file changes
+    /// mid-session. Prevents log spam from watchers that rewrite the overlay
+    /// on a timer.
+    static_prompt_change_warned: std::sync::atomic::AtomicBool,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
@@ -296,6 +305,8 @@ impl Agent {
             locked_tools: None,
             mcp_late_register_resolved: false,
             system_prompt_override: None,
+            static_prompt_files: std::sync::OnceLock::new(),
+            static_prompt_change_warned: std::sync::atomic::AtomicBool::new(false),
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,

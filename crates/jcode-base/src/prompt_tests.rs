@@ -456,3 +456,175 @@ fn project_system_prompt_file_replaces_default_base_prompt() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn test_pinned_static_prompt_prefix_is_byte_identical_across_calls() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(temp.path().join("prompt-overlay.md"), "overlay v1").unwrap();
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(project_dir.path().join(".jcode")).unwrap();
+    std::fs::write(
+        project_dir.path().join(".jcode/preferred-tools.md"),
+        "preferred tools v1",
+    )
+    .unwrap();
+
+    let files = crate::prompt::StaticPromptFiles::load(Some(project_dir.path()));
+    let (split_a, _) = crate::prompt::build_system_prompt_split_from_files(
+        &files,
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+    );
+    let (split_b, _) = crate::prompt::build_system_prompt_split_from_files(
+        &files,
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+    );
+    assert_eq!(
+        split_a.static_part, split_b.static_part,
+        "static part must be byte-identical across calls while files are unchanged"
+    );
+    assert!(split_a.static_part.contains("overlay v1"));
+    assert!(split_a.static_part.contains("preferred tools v1"));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_pinned_static_prompt_prefix_ignores_mid_session_file_edits() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(temp.path().join("prompt-overlay.md"), "global overlay v1").unwrap();
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(project_dir.path().join(".jcode")).unwrap();
+    std::fs::write(
+        project_dir.path().join(".jcode/prompt-overlay.md"),
+        "project overlay v1",
+    )
+    .unwrap();
+
+    let files = crate::prompt::StaticPromptFiles::load(Some(project_dir.path()));
+    let (split_before, _) = crate::prompt::build_system_prompt_split_from_files(
+        &files,
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+    );
+    assert!(split_before.static_part.contains("project overlay v1"));
+
+    // Simulate a watcher rewriting the overlay mid-session.
+    std::fs::write(
+        project_dir.path().join(".jcode/prompt-overlay.md"),
+        "project overlay v2 with substantially longer content",
+    )
+    .unwrap();
+
+    let (split_after, _) = crate::prompt::build_system_prompt_split_from_files(
+        &files,
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+    );
+    assert_eq!(
+        split_before.static_part, split_after.static_part,
+        "pinned static part must ignore mid-session file edits"
+    );
+    assert!(
+        !split_after.static_part.contains("v2"),
+        "pinned static part must keep serving the session-start content"
+    );
+
+    // Drift is still surfaced for observability.
+    let changes = files.detect_changes(Some(project_dir.path()));
+    assert_eq!(changes.len(), 1, "expected exactly one drifted file");
+    assert_eq!(changes[0].label, "prompt-overlay.md");
+    let pinned_total = "global overlay v1".len() + "project overlay v1".len();
+    let current_total =
+        "global overlay v1".len() + "project overlay v2 with substantially longer content".len();
+    assert_eq!(changes[0].pinned_bytes, pinned_total);
+    assert_eq!(changes[0].current_bytes, current_total);
+
+    // The unpinned path still sees the edit (only the pinned path freezes it).
+    let (split_fresh, _) =
+        crate::prompt::build_system_prompt_split(None, &[], false, None, Some(project_dir.path()));
+    assert!(split_fresh.static_part.contains("v2"));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_static_prompt_files_detect_agents_md_and_base_prompt_drift() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(project_dir.path().join(".jcode")).unwrap();
+    std::fs::write(project_dir.path().join("AGENTS.md"), "instructions v1").unwrap();
+    std::fs::write(
+        project_dir.path().join(".jcode/system-prompt.md"),
+        "custom base v1",
+    )
+    .unwrap();
+
+    let files = crate::prompt::StaticPromptFiles::load(Some(project_dir.path()));
+    assert!(
+        files
+            .agents_md
+            .as_deref()
+            .unwrap()
+            .contains("instructions v1")
+    );
+    assert_eq!(files.base_system_prompt, "custom base v1");
+    assert!(files.detect_changes(Some(project_dir.path())).is_empty());
+
+    std::fs::write(project_dir.path().join("AGENTS.md"), "instructions v2").unwrap();
+    std::fs::write(
+        project_dir.path().join(".jcode/system-prompt.md"),
+        "custom base v2",
+    )
+    .unwrap();
+
+    let changes = files.detect_changes(Some(project_dir.path()));
+    let labels: Vec<&str> = changes.iter().map(|c| c.label).collect();
+    assert!(
+        labels.contains(&"AGENTS.md"),
+        "expected AGENTS.md drift, got {labels:?}"
+    );
+    assert!(
+        labels.contains(&"system-prompt.md"),
+        "expected system-prompt.md drift, got {labels:?}"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}

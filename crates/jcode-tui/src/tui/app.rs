@@ -883,6 +883,15 @@ pub struct App {
     context_warning_shown: bool,
     // Context info (what's loaded in system prompt)
     context_info: crate::prompt::ContextInfo,
+    /// Session-pinned snapshot of the file-backed static prompt inputs
+    /// (system-prompt.md, AGENTS.md, prompt-overlay.md, preferred-tools.md).
+    /// Loaded once per session so mid-session edits cannot silently invalidate
+    /// the provider prompt cache.
+    static_prompt_files: Option<crate::prompt::StaticPromptFiles>,
+    /// Guards the one-time warning when a pinned static prompt file changes
+    /// mid-session. Prevents log spam from watchers that rewrite the overlay
+    /// on a timer.
+    static_prompt_change_warned: bool,
     // Monotonic revision for prompt/context-affecting state. Info widgets use this to avoid stale
     // cached context after compaction, prompt rebuilds, tool-definition refreshes, or message edits.
     context_revision: u64,

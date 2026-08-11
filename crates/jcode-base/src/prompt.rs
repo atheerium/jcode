@@ -476,6 +476,106 @@ pub fn build_system_prompt_full_with_capabilities(
     (prompt, info)
 }
 
+/// Session-pinned snapshot of the file-backed inputs to the static (cacheable)
+/// system prompt prefix.
+///
+/// The static prefix is only cacheable while it stays byte-identical across
+/// turns. Re-reading these files on every turn means any mid-session edit to
+/// `system-prompt.md`, `AGENTS.md`, `prompt-overlay.md`, or `preferred-tools.md`
+/// silently invalidates the provider's prompt cache and the whole prefix is
+/// re-processed at full cost. Sessions therefore load the files once, reuse
+/// the snapshot for every turn, and surface drift via [`detect_changes`]
+/// instead of silently re-sending changed content.
+///
+/// [`detect_changes`]: StaticPromptFiles::detect_changes
+#[derive(Debug, Clone)]
+pub struct StaticPromptFiles {
+    /// Resolved base system prompt (project/global override or built-in default).
+    pub base_system_prompt: String,
+    /// Combined AGENTS.md content (project + global), when present.
+    pub agents_md: Option<String>,
+    /// AGENTS.md load metadata (per-file presence and char counts).
+    pub agents_md_info: ContextInfo,
+    /// Combined prompt-overlay.md content (project + global), when present.
+    pub prompt_overlay: Option<String>,
+    /// Raw char count of the prompt-overlay inputs at pin time.
+    pub prompt_overlay_chars: usize,
+    /// Combined preferred-tools.md content (project + global), when present.
+    pub preferred_tools: Option<String>,
+    /// Raw char count of the preferred-tools inputs at pin time.
+    pub preferred_tools_chars: usize,
+}
+
+/// One file-backed static prompt input that drifted from its pinned snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptFileChange {
+    /// Label identifying the file family, e.g. `"AGENTS.md"`.
+    pub label: &'static str,
+    /// Byte size captured in the pinned snapshot.
+    pub pinned_bytes: usize,
+    /// Byte size currently on disk.
+    pub current_bytes: usize,
+}
+
+impl StaticPromptFiles {
+    /// Read every file-backed static prompt input for `working_dir` once.
+    pub fn load(working_dir: Option<&Path>) -> Self {
+        let base_system_prompt = load_base_system_prompt(working_dir);
+        let (agents_md, agents_md_info) = load_agents_md_files_from_dir(working_dir);
+        let (prompt_overlay, prompt_overlay_chars) =
+            load_prompt_overlay_files_from_dir(working_dir);
+        let (preferred_tools, preferred_tools_chars) =
+            load_preferred_tools_files_from_dir(working_dir);
+        Self {
+            base_system_prompt,
+            agents_md,
+            agents_md_info,
+            prompt_overlay,
+            prompt_overlay_chars,
+            preferred_tools,
+            preferred_tools_chars,
+        }
+    }
+
+    /// Re-read the same files and report which inputs have changed since the
+    /// snapshot was pinned. Cheap enough to run per turn; callers surface the
+    /// result as a one-time warning rather than silently serving stale bytes.
+    pub fn detect_changes(&self, working_dir: Option<&Path>) -> Vec<PromptFileChange> {
+        let mut changes = Vec::new();
+        let current = Self::load(working_dir);
+
+        if current.base_system_prompt != self.base_system_prompt {
+            changes.push(PromptFileChange {
+                label: "system-prompt.md",
+                pinned_bytes: self.base_system_prompt.len(),
+                current_bytes: current.base_system_prompt.len(),
+            });
+        }
+        if current.agents_md != self.agents_md {
+            changes.push(PromptFileChange {
+                label: "AGENTS.md",
+                pinned_bytes: self.agents_md.as_deref().map_or(0, str::len),
+                current_bytes: current.agents_md.as_deref().map_or(0, str::len),
+            });
+        }
+        if current.prompt_overlay != self.prompt_overlay {
+            changes.push(PromptFileChange {
+                label: "prompt-overlay.md",
+                pinned_bytes: self.prompt_overlay_chars,
+                current_bytes: current.prompt_overlay_chars,
+            });
+        }
+        if current.preferred_tools != self.preferred_tools {
+            changes.push(PromptFileChange {
+                label: "preferred-tools.md",
+                pinned_bytes: self.preferred_tools_chars,
+                current_bytes: current.preferred_tools_chars,
+            });
+        }
+        changes
+    }
+}
+
 /// Build system prompt split into static (cacheable) and dynamic parts
 /// This improves cache hit rate by keeping frequently-changing content separate
 pub fn build_system_prompt_split(
@@ -495,6 +595,29 @@ pub fn build_system_prompt_split(
     )
 }
 
+/// Same as [`build_system_prompt_split`] but builds the static part from a
+/// session-pinned snapshot of the file-backed inputs instead of re-reading
+/// them from disk. The static part is byte-identical across turns unless the
+/// session explicitly reloads the files.
+pub fn build_system_prompt_split_from_files(
+    files: &StaticPromptFiles,
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+) -> (SplitSystemPrompt, ContextInfo) {
+    build_system_prompt_split_with_capabilities_from_files(
+        files,
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        PromptCapabilities::current(),
+    )
+}
+
 pub fn build_system_prompt_split_with_capabilities(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
@@ -503,7 +626,30 @@ pub fn build_system_prompt_split_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
+    build_system_prompt_split_with_capabilities_from_files(
+        &StaticPromptFiles::load(working_dir),
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        capabilities,
+    )
+}
+
+pub fn build_system_prompt_split_with_capabilities_from_files(
+    files: &StaticPromptFiles,
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    capabilities: PromptCapabilities,
+) -> (SplitSystemPrompt, ContextInfo) {
+    let mut static_parts = vec![files.base_system_prompt.clone()];
+    if capabilities.mermaid {
+        static_parts.push(MERMAID_PROMPT.to_string());
+    }
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
         system_prompt_chars: static_parts.join("\n\n").len(),
@@ -520,29 +666,25 @@ pub fn build_system_prompt_split_with_capabilities(
         static_parts.push(selfdev_prompt);
     }
 
-    // Add AGENTS.md instructions (static per project)
-    let (md_content, md_info) = load_agents_md_files_from_dir(working_dir);
-    if let Some(content) = md_content {
-        static_parts.push(content);
+    // Add AGENTS.md instructions (static per project, pinned per session)
+    if let Some(content) = &files.agents_md {
+        static_parts.push(content.clone());
     }
-    info.has_project_agents_md = md_info.has_project_agents_md;
-    info.project_agents_md_chars = md_info.project_agents_md_chars;
-    info.has_global_agents_md = md_info.has_global_agents_md;
-    info.global_agents_md_chars = md_info.global_agents_md_chars;
+    info.has_project_agents_md = files.agents_md_info.has_project_agents_md;
+    info.project_agents_md_chars = files.agents_md_info.project_agents_md_chars;
+    info.has_global_agents_md = files.agents_md_info.has_global_agents_md;
+    info.global_agents_md_chars = files.agents_md_info.global_agents_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
-    if let Some(content) = overlay_content {
-        info.prompt_overlay_chars = overlay_chars;
-        static_parts.push(content);
+    if let Some(content) = &files.prompt_overlay {
+        info.prompt_overlay_chars = files.prompt_overlay_chars;
+        static_parts.push(content.clone());
     }
 
     // Add optional preferred-tool guidance (static per project/user)
-    let (preferred_tools_content, preferred_tools_chars) =
-        load_preferred_tools_files_from_dir(working_dir);
-    if let Some(content) = preferred_tools_content {
-        info.preferred_tools_chars = preferred_tools_chars;
-        static_parts.push(content);
+    if let Some(content) = &files.preferred_tools {
+        info.preferred_tools_chars = files.preferred_tools_chars;
+        static_parts.push(content.clone());
     }
 
     // Add available skills list (fairly static)

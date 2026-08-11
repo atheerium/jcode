@@ -27,7 +27,33 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
-        let (mut split, context_info) = crate::prompt::build_system_prompt_split(
+        // Pin the file-backed static inputs once per session so mid-session
+        // edits to system-prompt.md / AGENTS.md / prompt-overlay.md /
+        // preferred-tools.md cannot silently invalidate the provider prompt
+        // cache. Drift is surfaced as a one-time warning instead.
+        let files = self
+            .static_prompt_files
+            .get_or_insert_with(|| crate::prompt::StaticPromptFiles::load(None));
+        let changes = files.detect_changes(None);
+        if !changes.is_empty() && !self.static_prompt_change_warned {
+            self.static_prompt_change_warned = true;
+            let detail = changes
+                .iter()
+                .map(|change| {
+                    format!(
+                        "{} ({} -> {} bytes)",
+                        change.label, change.pinned_bytes, change.current_bytes
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            crate::logging::warn(&format!(
+                "SYSTEM_PROMPT_PREFIX_CHANGED: {}; keeping pinned prefix for this session (restart to apply)",
+                detail
+            ));
+        }
+        let (mut split, context_info) = crate::prompt::build_system_prompt_split_from_files(
+            files,
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,

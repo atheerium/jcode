@@ -107,7 +107,37 @@ impl Agent {
             .as_ref()
             .map(std::path::PathBuf::from);
 
-        let (mut split, _context_info) = crate::prompt::build_system_prompt_split(
+        // Pin the file-backed static inputs once per session so mid-session
+        // edits to system-prompt.md / AGENTS.md / prompt-overlay.md /
+        // preferred-tools.md cannot silently invalidate the provider prompt
+        // cache. Drift is surfaced as a one-time warning instead.
+        let files = self
+            .static_prompt_files
+            .get_or_init(|| crate::prompt::StaticPromptFiles::load(working_dir.as_deref()));
+        let changes = files.detect_changes(working_dir.as_deref());
+        if !changes.is_empty()
+            && !self
+                .static_prompt_change_warned
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let detail = changes
+                .iter()
+                .map(|change| {
+                    format!(
+                        "{} ({} -> {} bytes)",
+                        change.label, change.pinned_bytes, change.current_bytes
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            logging::warn(&format!(
+                "SYSTEM_PROMPT_PREFIX_CHANGED: {}; keeping pinned prefix for this session (restart to apply)",
+                detail
+            ));
+        }
+
+        let (mut split, _context_info) = crate::prompt::build_system_prompt_split_from_files(
+            files,
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
@@ -132,5 +162,144 @@ impl Agent {
         _memory_event_tx: Option<crate::memory::MemoryEventSink>,
     ) -> Option<crate::memory::PendingMemory> {
         self.build_memory_prompt_nonblocking_shared(messages.to_vec().into(), _memory_event_tx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct MockProvider;
+
+    #[async_trait]
+    impl crate::provider::Provider for MockProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            Err(anyhow::anyhow!(
+                "mock provider must not complete in prompt tests"
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn model(&self) -> String {
+            "mock-model".to_string()
+        }
+
+        fn fork(&self) -> Arc<dyn crate::provider::Provider> {
+            Arc::new(MockProvider)
+        }
+    }
+
+    fn real_agent_with_working_dir(working_dir: String) -> Agent {
+        let provider: Arc<dyn crate::provider::Provider> = Arc::new(MockProvider);
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut session =
+            crate::session::Session::create_with_id("prompt-pin-test".to_string(), None, None);
+        session.model = Some("mock-model".to_string());
+        session.working_dir = Some(working_dir);
+        Agent::new_with_session(provider, registry, session, None)
+    }
+
+    /// Real-Agent integration boundary: the session pin must survive across
+    /// turns of the actual `Agent::build_system_prompt_split` path, ignoring a
+    /// mid-session overlay edit while surfacing drift exactly once.
+    #[test]
+    fn agent_build_system_prompt_split_pins_static_files_per_session() {
+        let _guard = crate::storage::lock_test_env();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let project_dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(project_dir.path().join(".jcode")).unwrap();
+        std::fs::write(
+            project_dir.path().join(".jcode/prompt-overlay.md"),
+            "overlay v1",
+        )
+        .unwrap();
+
+        let mut agent = real_agent_with_working_dir(project_dir.path().display().to_string());
+        assert!(
+            !agent
+                .static_prompt_change_warned
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        // Initialize the real logger against the sandboxed JCODE_HOME so the
+        // drift warning is observable in the actual rotated log file.
+        crate::logging::init();
+
+        let split_a = agent.build_system_prompt_split(None);
+        assert!(split_a.static_part.contains("overlay v1"));
+        assert!(
+            !agent
+                .static_prompt_change_warned
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        // The pin is installed and no drift existed yet.
+        let files = agent.static_prompt_files.get().expect("pin installed");
+        assert!(files.detect_changes(Some(project_dir.path())).is_empty());
+
+        // Mid-session edit by an external watcher.
+        std::fs::write(
+            project_dir.path().join(".jcode/prompt-overlay.md"),
+            "overlay v2 with substantially longer content",
+        )
+        .unwrap();
+
+        let split_b = agent.build_system_prompt_split(None);
+        assert_eq!(
+            split_a.static_part, split_b.static_part,
+            "real Agent must keep serving the session-start static part"
+        );
+        assert!(
+            !split_b.static_part.contains("v2"),
+            "pinned static part must ignore the mid-session edit"
+        );
+        assert!(
+            agent
+                .static_prompt_change_warned
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "drift must have been surfaced once"
+        );
+
+        // A third turn must NOT warn again (one-shot guard), and the pin is
+        // still serving the original bytes while drift remains detectable.
+        let split_c = agent.build_system_prompt_split(None);
+        assert_eq!(split_a.static_part, split_c.static_part);
+        assert!(!files.detect_changes(Some(project_dir.path())).is_empty());
+
+        // The drift warning must have reached the real rotated log file
+        // exactly once, with the byte delta, through the real logger.
+        let log_dir = crate::storage::logs_dir().expect("log dir");
+        let log = std::fs::read_to_string(log_dir.join(format!(
+            "jcode-{}.log",
+            chrono::Local::now().format("%Y-%m-%d")
+        )))
+        .expect("log file readable");
+        let warn_count = log.matches("SYSTEM_PROMPT_PREFIX_CHANGED").count();
+        assert_eq!(
+            warn_count, 1,
+            "expected exactly one SYSTEM_PROMPT_PREFIX_CHANGED in real log, got {warn_count}\n{log}"
+        );
+        assert!(log.contains("prompt-overlay.md"));
+        assert!(log.contains("keeping pinned prefix for this session"));
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 }
